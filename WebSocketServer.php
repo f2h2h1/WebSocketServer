@@ -1,0 +1,410 @@
+<?php
+class WebSocketServer
+{
+    private $config;
+    private $read_socket;
+    private $write_socket;
+    protected $ws_conn;
+
+    function __construct($ip, $port, $somaxconn, $echolog, $locallog) {
+        $this->config = array();
+        $this->config['ip'] = $ip;
+        $this->config['port'] = $port;
+        $this->config['somaxconn'] = $somaxconn;
+        $this->read_socket = array();
+        $this->write_socket = array();
+        $this->ws_conn = array();
+    }
+
+    public function run() {
+        $ip = $this->config['ip'];
+        $port = $this->config['port'];
+        $somaxconn = $this->config['somaxconn'];
+
+        if (false == ($sock = @socket_create(AF_INET, SOCK_STREAM, SOL_TCP))) {
+            die("socket_create() failed: reason: " . socket_strerror(socket_last_error())."\n");
+        }
+        if (false == (@socket_bind($sock, $ip, $port))) {
+            die("socket_bind() failed: reason: " . socket_strerror(socket_last_error())."\n");
+        }
+        if (false == (@socket_listen($sock, $somaxconn))) {
+            die("socket_listen() failed: reason: " . socket_strerror(socket_last_error())."\n");
+        }
+        socket_set_nonblock($sock); // 非阻塞
+        // 接收套接流的最大超时时间1秒，后面是微秒单位超时时间，设置为零，表示不管它
+        socket_set_option($sock, SOL_SOCKET, SO_RCVTIMEO, array("sec" => 1, "usec" => 0));
+        $this->logger("server start");
+
+        $except_socks = NULL;  // 注意 php 不支持直接将NULL作为引用传参，所以这里定义一个变量
+
+        array_push($this->read_socket, $sock);
+        array_push($this->write_socket, $sock);
+        $i = 0;
+        while (true) {
+            /* 这两个数组会被改变，所以用两个临时变量 */
+            $tmp_reads = $this->read_socket;
+            $tmp_writes = $this->write_socket;
+
+            // socket_set_nonblock($sock);
+            $count = socket_select($tmp_reads, $tmp_writes, $except_socks, 0);  // timeout 传 NULL 会一直阻塞直到有结果返回
+
+            if (in_array($sock, $tmp_reads)) {
+                $newconn = socket_accept($sock);
+                if ($newconn) {
+
+                    // 把新的连接sokcet加入监听
+                    array_push($this->read_socket, $newconn);
+                    array_push($this->write_socket, $newconn);
+                    $wsid = $this->addNewconn($newconn);
+
+                    $wsid = $this->getWsid($newconn);
+                    $this->logger("new Client", $wsid);
+
+                    $line = $this->usocketRead($newconn);
+                    if (!$this->handShake($wsid, $line)) {
+                        // 握手失败
+                        $this->wsClose($newconn);
+                        $this->logger("handshake fail", $wsid);
+                        continue;
+                    }
+                    $this->logger("handshake success", $wsid);
+
+                    if (method_exists($this, "onConnect")) {
+                        $this->onConnect($this->ws_conn[$wsid]);
+                    }
+
+                    array_splice($tmp_reads, array_search($newconn, $tmp_reads), 1);
+                }
+            }
+
+            // 轮循读通道
+            foreach ($tmp_reads as $rfd) {
+                // 从通道读取
+                $received = $this->wsRead($rfd);
+                if ($received === false) {
+                    continue;
+                } else {
+                    $opcode = $received->getOpcode();
+                    $wsid = $this->getWsid($rfd);
+                    if ($opcode == 0x8) { // 客户端主动关闭连接
+                        if (method_exists($this, "onClose")) {
+                            $this->onClose($this->ws_conn[$wsid]);
+                        }
+                        $this->wsClose($rfd);
+                        continue;
+                    }
+                    if ($opcode == 0x9) { // 心跳连接ping帧
+                        echo "ping\n";
+                        continue;
+                    }
+                    if ($opcode == 0xA) { // 心跳连接pong帧
+                        echo "pong\n";
+                        continue;
+                    }
+                    if (method_exists($this, "onMessage")) {
+                        $this->onMessage($this->ws_conn[$wsid], $received);
+                    }
+                }
+            }
+
+            unset($tmp_reads);
+            unset($tmp_writes);
+        }
+    }
+
+    protected function getConfig() {
+        return $this->config;
+    }
+
+    private function addNewconn($newconn) {
+        $wsid = uniqid('wsid_');
+        $resid = (int)$newconn;
+        socket_getpeername($newconn, $ip, $port);  //获取远程客户端ip地址和端口
+        $newconn_obj = new class($wsid, $newconn, $resid, $ip, $port) {
+            private $info;
+            function __construct($wsid, $resource, $resid, $ip, $port) {
+                $this->info = array();
+                $this->info['wsid'] = $wsid;
+                $this->info['resource'] = $resource;
+                $this->info['resid'] = $resid;
+                $this->info['ip'] = $ip;
+                $this->info['port'] = $port;
+                $this->info['handshake'] = false;
+            }
+            public function getWsid() {
+                return $this->wsid['wsid'];
+            }
+            public function getResource() {
+                return $this->info['resource'];
+            }
+            public function getResid() {
+                return $this->info['resid'];
+            }
+            public function getIp() {
+                return $this->info['ip'];
+            }
+            public function getPort() {
+                return $this->info['port'];
+            }
+            public function getHandShake() {
+                return $this->info['handshake'];
+            }
+            public function handShakeSuccess() {
+                $this->info['handshake'] = true;
+            }
+            public function getInfo() {
+                return $this->info;
+            }
+        };
+        $this->ws_conn[$wsid] = $newconn_obj;
+        return $wsid;
+    }
+
+    private function getWsid($sock) {
+        foreach ($this->ws_conn as $k => $v) {
+            if ($sock == $v->getResource()) {
+                return $k;
+            }
+        }
+        return false;
+    }
+
+    private function handShake($wsid, $line) {
+        if ($line === '') {
+            return false;
+        }
+        // Get Sec-WebSocket-Key.
+        $Sec_WebSocket_Key = '';
+        if (preg_match("/Sec-WebSocket-Key: *(.*?)\r\n/i", $line, $match)) {
+            $Sec_WebSocket_Key = $match[1];
+            if (empty($Sec_WebSocket_Key)) {
+                return false;
+            }
+        }
+        // Calculation websocket key.
+        $new_key = base64_encode(sha1($Sec_WebSocket_Key . "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", true));
+        // Handshake response data.
+        $handshake_message = "HTTP/1.1 101 Switching Protocols\r\n";
+        $handshake_message .= "Upgrade: websocket\r\n";
+        $handshake_message .= "Sec-WebSocket-Version: 13\r\n";
+        $handshake_message .= "Connection: Upgrade\r\n";
+        $handshake_message .= "Sec-WebSocket-Accept: " . $new_key . "\r\n\r\n";
+        $ret = socket_write($this->ws_conn[$wsid]->getResource(),  $handshake_message);
+        if ($ret === false) {
+            return false;
+        }
+        $this->ws_conn[$wsid]->handShakeSuccess();
+        return true;
+    }
+
+    private function wsRead($rfd) {
+        $received = $this->usocketRead($rfd);
+
+        if ($received === false) {
+            return false;
+        }
+        return $this->decode($received);
+    }
+
+    private function usocketRead($rfd) {
+        $i = (int)$rfd;
+        $line = '';
+        $flg = 0;
+        while (true) {
+            $command = socket_read($rfd, 1);
+            if ($command === '') {
+                break;
+            }
+            if ($command === false) {
+                $flg = 1;
+                break;
+            }
+            $line .= $command;
+        }
+
+        if ($line == '') {
+            if ($flg == 1) {
+                $this->logger("Connection closed on socket $i.");
+                $this->wsClose($rfd);
+            }
+            echo "等待数据\n";
+            return false;
+        }
+
+        return $line;
+    }
+
+    protected function wsWrite($rfd, $content) {
+        $response = $this->encode($content);
+        $ret = socket_write($rfd, $response, strlen($response));
+    }
+
+    private function wsClose($rfd) {
+        $wsid = $this->getWsid($rfd);
+        $status = 1;
+        $response = "\x88".chr(strlen($status)).$status; // 发送关闭帧
+        $ret = socket_write($rfd, $response, strlen($response));
+
+        @socket_shutdown($rfd);
+        @socket_close($rfd);
+        $key = array_search($rfd, $this->read_socket);
+        if ($key) {
+            array_splice($this->read_socket, $key, 1);
+        }
+        $key = array_search($rfd, $this->write_socket);
+        if ($key) {
+            array_splice($this->write_socket, $key, 1);
+        }
+
+        $this->logger("close conn", $wsid);
+
+        unset($this->ws_conn[$wsid]);
+    }
+
+    /**
+     * 数据从浏览器通过websocket发送给服务器的数据，是原始的帧数据
+     * 默认是被掩码处理过的，所以需要对其利用掩码进行解码。
+     */
+    private function encode($buffer) {
+        $len = strlen($buffer);
+
+        $first_byte = "\x81"; // 这是16进制数字 81 即二进制的 10000001 即十进制的 129
+
+        if ($len <= 125) {
+            $encode_buffer = $first_byte . chr($len) . $buffer;
+        } else {
+            if ($len <= 65535) {
+                $encode_buffer = $first_byte . chr(126) . pack("n", $len) . $buffer;
+            } else {
+              //pack("xxxN", $len)pack函数只处理2的32次方大小的文件，实际上2的32次方已经4G了。
+                $encode_buffer = $first_byte . chr(127) . pack("xxxxN", $len) . $buffer;
+            }
+        }
+
+        return $encode_buffer;
+    }
+
+    private function decode($buffer) {
+
+        $firstbyte  = ord($buffer[0]);
+        $secondbyte = ord($buffer[1]);
+
+        $len = $mask = $data = $decoded = null;
+
+        $len = $secondbyte & 127;
+        if ($len === 126) {
+            $mask = substr($buffer, 4, 4);
+            $data  = substr($buffer, 8);
+        } else {
+            if ($len === 127) {
+                $mask = substr($buffer, 10, 4);
+                $data = substr($buffer, 14);
+            } else {
+                $mask = substr($buffer, 2, 4);
+                $data = substr($buffer, 6);
+            }
+        }
+        for ($index = 0; $index < strlen($data); $index++) {
+            $decoded .= $data[$index] ^ $mask[$index % 4];
+        }
+
+        $fin = $this->getBitOne($firstbyte, 8);
+        $rsv1 = $this->getBitOne($firstbyte, 7);
+        $rsv2 = $this->getBitOne($firstbyte, 6);
+        $rsv3 = $this->getBitOne($firstbyte, 5);
+        $opcode = $this->getBit($firstbyte, 4, 0);
+
+        return new class($fin, $rsv1, $rsv2, $rsv3,
+                        $opcode, $mask, $len, $decoded) {
+            private $info;
+
+            function __construct($fin, $rsv1, $rsv2, $rsv3,
+                        $opcode, $mask, $playload_len, $data) {
+                $this->info['fin'] = $fin;
+                $this->info['rsv1'] = $rsv1;
+                $this->info['rsv2'] = $rsv2;
+                $this->info['rsv3'] = $rsv3;
+                $this->info['opcode'] = $opcode;
+                $this->info['mask'] = $mask;
+                $this->info['playload_len'] = $playload_len;
+                $this->info['data'] = $data;
+            }
+
+            public function getFin() {
+                return $this->info['fin'];
+            }
+            public function getRsv1() {
+                return $this->info['rsv1'];
+            }
+            public function getRsv2() {
+                return $this->info['rsv2'];
+            }
+            public function getRsv3() {
+                return $this->info['rsv3'];
+            }
+            public function getOpcode() {
+                return $this->info['opcode'];
+            }
+            public function getMask() {
+                return $this->info['mask'];
+            }
+            public function getPlayloadLen() {
+                return $this->info['playload_len'];
+            }
+            public function getData() {
+                return $this->info['data'];
+            }
+            public function getRsv() {
+                return $this->get_rsv1().$this->get_rsv2().$this->get_rsv3();
+            }
+            public function getInfo() {
+                return $this->info;
+            }
+        };
+    }
+
+
+    /**
+     * 截取一个字节某一段bit
+     *
+     * @param Integer $t 目标字节
+     * @param Integer $l 某段bit的长度
+     * @param Integer $s 开始截取的位置位置，从右往左
+     * @return Integer
+     */
+    private function getBit($t, $l, $s) {
+        return (((2<<($l-1))-1)<<$s&$t)>>$s;
+    }
+
+    /**
+     * 获取一个字节第n位的bit，从右往左
+     *
+     * @param Integer $t 目标字节
+     * @param Integer $n 第n位，从右往左
+     * @return Integer
+     */
+    private function getBitOne($t, $n) {
+        return 0x01&($t>>$n-1);
+    }
+
+    private function logger($msg, $wsid = null, $level = 0) {
+        $time = date('Y-m-d H:i:s');
+        if (empty($wsid)) {
+            $out = "[".$time."] ".$msg;
+        } else {
+            $client = array(
+                'wsid' => $wsid,
+                'resid' => $this->ws_conn[$wsid]->getResource(),
+                'ip' => $this->ws_conn[$wsid]->getIp().":".$this->ws_conn[$wsid]->getPort(),
+                'h' => (int)$this->ws_conn[$wsid]->getHandShake(),
+            );
+            $client_str = '';
+            foreach ($client as $k => $v) {
+                $client_str .= $k."=".$v." ";
+            }
+            $out = "[".$time."] ".$msg."\t".$client_str;
+        }
+
+        echo $out.PHP_EOL;
+    }
+}
