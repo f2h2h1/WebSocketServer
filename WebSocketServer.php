@@ -3,10 +3,18 @@ class WebSocketServer
 {
     private $config;
     private $read_socket;
-    private $write_socket;
-    protected $ws_conn;
+    public $ws_conn;
+
+    public $onConnect = null;
+    public $onClose = null;
+    public $onMessage = null;
 
     function __construct($ip, $port, $somaxconn, $echolog, $locallog) {
+
+        set_error_handler(function($errno, $errstr, $errfile, $errline) {
+            throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
+        });
+
         $this->config = array();
         $this->config['ip'] = $ip;
         $this->config['port'] = $port;
@@ -35,26 +43,19 @@ class WebSocketServer
         socket_set_option($sock, SOL_SOCKET, SO_RCVTIMEO, array("sec" => 1, "usec" => 0));
         $this->logger("server start");
 
-        $except_socks = NULL;  // 注意 php 不支持直接将NULL作为引用传参，所以这里定义一个变量
-
         array_push($this->read_socket, $sock);
-        array_push($this->write_socket, $sock);
-        $i = 0;
+
         while (true) {
-            /* 这两个数组会被改变，所以用两个临时变量 */
-            $tmp_reads = $this->read_socket;
-            $tmp_writes = $this->write_socket;
 
-            // socket_set_nonblock($sock);
-            $count = socket_select($tmp_reads, $tmp_writes, $except_socks, 0);  // timeout 传 NULL 会一直阻塞直到有结果返回
-
+            $tmp_reads = $this->select($this->read_socket);
+            if ($tmp_reads == false) {
+                continue;
+            }
             if (in_array($sock, $tmp_reads)) {
                 $newconn = socket_accept($sock);
                 if ($newconn) {
 
                     // 把新的连接sokcet加入监听
-                    array_push($this->read_socket, $newconn);
-                    array_push($this->write_socket, $newconn);
                     $wsid = $this->addNewconn($newconn);
 
                     $wsid = $this->getWsid($newconn);
@@ -69,9 +70,7 @@ class WebSocketServer
                     }
                     $this->logger("handshake success", $wsid);
 
-                    if (method_exists($this, "onConnect")) {
-                        $this->onConnect($this->ws_conn[$wsid]);
-                    }
+                    $this->call_func($this->onConnect, array($this->ws_conn[$wsid]));
 
                     array_splice($tmp_reads, array_search($newconn, $tmp_reads), 1);
                 }
@@ -87,23 +86,19 @@ class WebSocketServer
                     $opcode = $received->getOpcode();
                     $wsid = $this->getWsid($rfd);
                     if ($opcode == 0x8) { // 客户端主动关闭连接
-                        if (method_exists($this, "onClose")) {
-                            $this->onClose($this->ws_conn[$wsid]);
-                        }
+                        $this->call_func($this->onClose, array($this->ws_conn[$wsid]));
                         $this->wsClose($rfd);
                         continue;
                     }
                     if ($opcode == 0x9) { // 心跳连接ping帧
-                        echo "ping\n";
+                        $this->logger("ping", $wsid);
                         continue;
                     }
                     if ($opcode == 0xA) { // 心跳连接pong帧
-                        echo "pong\n";
+                        $this->logger("pong", $wsid);
                         continue;
                     }
-                    if (method_exists($this, "onMessage")) {
-                        $this->onMessage($this->ws_conn[$wsid], $received);
-                    }
+                    $this->call_func($this->onMessage, array($this->ws_conn[$wsid], $received));
                 }
             }
 
@@ -112,11 +107,25 @@ class WebSocketServer
         }
     }
 
-    protected function getConfig() {
+    public function select($tmp_reads) {
+        $tmp_writes = null;
+        $except_socks = null; // 注意 php 不支持直接将NULL作为引用传参，所以这里定义一个变量
+        $count = socket_select($tmp_reads, $tmp_writes, $except_socks, 1); // timeout 传 NULL 会一直阻塞直到有结果返回
+
+        if ($count == 0) {
+            return false;
+        }
+        return $tmp_reads;
+    }
+
+    public function getConfig() {
         return $this->config;
     }
 
     private function addNewconn($newconn) {
+
+        array_push($this->read_socket, $newconn);
+
         $wsid = uniqid('wsid_');
         $resid = (int)$newconn;
         socket_getpeername($newconn, $ip, $port);  //获取远程客户端ip地址和端口
@@ -227,19 +236,21 @@ class WebSocketServer
                 $this->logger("Connection closed on socket $i.");
                 $this->wsClose($rfd);
             }
-            echo "等待数据\n";
+            var_dump($rfd);
+            print_r($this->ws_conn);
+            // echo "等待数据\n";
             return false;
         }
 
         return $line;
     }
 
-    protected function wsWrite($rfd, $content) {
+    public function wsWrite($rfd, $content) {
         $response = $this->encode($content);
         $ret = socket_write($rfd, $response, strlen($response));
     }
 
-    private function wsClose($rfd) {
+    public function wsClose($rfd) {
         $wsid = $this->getWsid($rfd);
         $status = 1;
         $response = "\x88".chr(strlen($status)).$status; // 发送关闭帧
@@ -250,10 +261,6 @@ class WebSocketServer
         $key = array_search($rfd, $this->read_socket);
         if ($key) {
             array_splice($this->read_socket, $key, 1);
-        }
-        $key = array_search($rfd, $this->write_socket);
-        if ($key) {
-            array_splice($this->write_socket, $key, 1);
         }
 
         $this->logger("close conn", $wsid);
@@ -313,6 +320,7 @@ class WebSocketServer
         $rsv2 = $this->getBitOne($firstbyte, 6);
         $rsv3 = $this->getBitOne($firstbyte, 5);
         $opcode = $this->getBit($firstbyte, 4, 0);
+        $mask = $this->getBitOne($secondbyte, 8);
 
         return new class($fin, $rsv1, $rsv2, $rsv3,
                         $opcode, $mask, $len, $decoded) {
@@ -394,7 +402,7 @@ class WebSocketServer
         } else {
             $client = array(
                 'wsid' => $wsid,
-                'resid' => $this->ws_conn[$wsid]->getResource(),
+                'resid' => $this->ws_conn[$wsid]->getResid(),
                 'ip' => $this->ws_conn[$wsid]->getIp().":".$this->ws_conn[$wsid]->getPort(),
                 'h' => (int)$this->ws_conn[$wsid]->getHandShake(),
             );
@@ -406,5 +414,23 @@ class WebSocketServer
         }
 
         echo $out.PHP_EOL;
+    }
+
+    private function call_func($func, $parameters) {
+        if (!is_object($func)) {
+            return;
+        }
+        array_push($parameters, $this);
+        try {
+            call_user_func_array($func, $parameters);
+        } catch (\Exception $e) {
+            echo 1;
+            var_dump($e);
+            exit(250);
+        } catch (\Error $e) {
+            echo 2;
+            var_dump($e);
+            exit(250);
+        }
     }
 }

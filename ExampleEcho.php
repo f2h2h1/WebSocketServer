@@ -2,23 +2,6 @@
 
 require_once("WebSocketServer.php");
 
-class ExampleEcho extends WebSocketServer
-{
-    protected function onConnect($ws_obj) {
-        echo "onConnect".PHP_EOL;
-        print_r($ws_obj);
-    }
-    protected function onClose($ws_obj) {
-        echo "onClose".PHP_EOL;
-        print_r($ws_obj);
-    }
-    protected function onMessage($ws_obj, $received) {
-        echo "onMessage".PHP_EOL;
-        print_r($received);
-        $this->wsWrite($ws_obj->getResource(), $received->getData());
-    }
-}
-
 $shortopts = array();
 $longopts  = array(
     "ip:",
@@ -33,5 +16,20 @@ $port = empty($cmd_options['port']) ? '1935' : $cmd_options['port'];
 $somaxconn = empty($cmd_options['somaxconn']) ? '256' : $cmd_options['somaxconn'];
 $locallog = 0;
 $echolog = 0;
-$ws = new ExampleEcho($ip, $port, $somaxconn, $echolog, $locallog);
+$ws = new WebSocketServer($ip, $port, $somaxconn, $echolog, $locallog);
+
+$ws->onConnect = function($conn, $wsObj) {
+    echo "onConnect".PHP_EOL;
+    print_r($conn);
+};
+$ws->onClose = function($conn, $wsObj) {
+    echo "onClose".PHP_EOL;
+    print_r($conn);
+};
+$ws->onMessage = function($conn, $received, $wsObj) {
+    echo "onMessage".PHP_EOL;
+    print_r($received);
+    $wsObj->wsWrite($conn->getResource(), $received->getData());
+};
+
 $ws->run();
