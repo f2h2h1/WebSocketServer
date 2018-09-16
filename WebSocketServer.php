@@ -107,6 +107,12 @@ class WebSocketServer
         }
     }
 
+    /**
+     * 获取活跃的链接
+     * 
+     * @param Resource $tmp_reads
+     * @return Resource $tmp_reads
+     */
     public function select($tmp_reads) {
         $tmp_writes = null;
         $except_socks = null; // 注意 php 不支持直接将NULL作为引用传参，所以这里定义一个变量
@@ -122,6 +128,12 @@ class WebSocketServer
         return $this->config;
     }
 
+    /**
+     * 新增链接
+     * 
+     * @param Resource $newconn
+     * @return Integer $wsid
+     */
     private function addNewconn($newconn) {
 
         array_push($this->read_socket, $newconn);
@@ -169,6 +181,12 @@ class WebSocketServer
         return $wsid;
     }
 
+    /**
+     * 通过socket resource获取wsid
+     * 
+     * @param Resource $sock
+     * @return Integer $wsid
+     */
     private function getWsid($sock) {
         foreach ($this->ws_conn as $k => $v) {
             if ($sock == $v->getResource()) {
@@ -178,6 +196,13 @@ class WebSocketServer
         return false;
     }
 
+    /**
+     * websocket握手
+     * 
+     * @param Integer $wsid
+     * @param String $line
+     * @return Boolean 
+     */
     private function handShake($wsid, $line) {
         if ($line === '') {
             return false;
@@ -206,6 +231,12 @@ class WebSocketServer
         return true;
     }
 
+    /**
+     * 读取客户端的内容
+     * 
+     * @param Resource $rfd
+     * @return String $line
+     */
     private function wsRead($rfd) {
         $received = $this->usocketRead($rfd);
 
@@ -245,11 +276,22 @@ class WebSocketServer
         return $line;
     }
 
+    /**
+     * 发送内容至客户端
+     * 
+     * @param Resource $rfd
+     * @param String $content
+     */
     public function wsWrite($rfd, $content) {
         $response = $this->encode($content);
         $ret = socket_write($rfd, $response, strlen($response));
     }
 
+    /**
+     * 关闭连接
+     * 
+     * @param Resource $rfd
+     */
     public function wsClose($rfd) {
         $wsid = $this->getWsid($rfd);
         $status = 1;
@@ -272,6 +314,13 @@ class WebSocketServer
      * 数据从浏览器通过websocket发送给服务器的数据，是原始的帧数据
      * 默认是被掩码处理过的，所以需要对其利用掩码进行解码。
      */
+
+    /**
+     * 编码
+     * 
+     * @param String $buffer
+     * @return String $encode_buffer
+     */
     private function encode($buffer) {
         $len = strlen($buffer);
 
@@ -291,6 +340,12 @@ class WebSocketServer
         return $encode_buffer;
     }
 
+    /**
+     * 编码
+     * 
+     * @param String $buffer
+     * @return Object $received
+     */
     private function decode($buffer) {
 
         $firstbyte  = ord($buffer[0]);
@@ -395,6 +450,13 @@ class WebSocketServer
         return 0x01&($t>>$n-1);
     }
 
+    /**
+     * 打印日志
+     * 
+     * @param String $buffer
+     * @param Integer $wsid
+     * @param Integer $level
+     */
     private function logger($msg, $wsid = null, $level = 0) {
         $time = date('Y-m-d H:i:s');
         if (empty($wsid)) {
