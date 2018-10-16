@@ -61,12 +61,15 @@ $ws->onMessage = function($conn, $received, $wsObj) {
 
 $ws->run();
 ```
-#### 目录结构    
+#### 目录结构
 ~~~
 ├─ExampleEcho.html       demo前端
 ├─ExampleEcho.php        demo后端
 ├─WebSocketServer.php    主文件
 ~~~
 #### TODO
-1.发送关闭帧    
-2.发送ping帧和回应pong帧    
+1.发送ping帧    
+2.数据分片    
+#### 存在的bug
+1.使用火狐浏览器首次连接时，速度非常慢    
+2.无法正确相应opcode为7的请求    

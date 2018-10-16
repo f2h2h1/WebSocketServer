@@ -11,9 +11,9 @@ class WebSocketServer
 
     function __construct($ip, $port, $somaxconn, $echolog, $locallog) {
 
-        set_error_handler(function($errno, $errstr, $errfile, $errline) {
-            throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
-        });
+        // set_error_handler(function($errno, $errstr, $errfile, $errline) {
+        //     throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
+        // });
 
         $this->config = array();
         $this->config['ip'] = $ip;
@@ -29,18 +29,28 @@ class WebSocketServer
         $port = $this->config['port'];
         $somaxconn = $this->config['somaxconn'];
 
+        $conf = array(
+            "ip:".$ip,
+            "port:".$port,
+            "somaxconn:".$somaxconn
+        );
+        $this->logger(implode(" ", $conf));
+
         if (false == ($sock = @socket_create(AF_INET, SOCK_STREAM, SOL_TCP))) {
-            die("socket_create() failed: reason: " . socket_strerror(socket_last_error())."\n");
+            die("socket_create() failed: reason: " . socket_strerror(socket_last_error()).PHP_EOL);
+        }
+        if (!socket_set_option($sock, SOL_SOCKET, SO_REUSEADDR, 1)) {
+            die("Unable to set option on socket: ". socket_strerror(socket_last_error()).PHP_EOL);
         }
         if (false == (@socket_bind($sock, $ip, $port))) {
-            die("socket_bind() failed: reason: " . socket_strerror(socket_last_error())."\n");
+            die("socket_bind() failed: reason: " . socket_strerror(socket_last_error()).PHP_EOL);
         }
         if (false == (@socket_listen($sock, $somaxconn))) {
-            die("socket_listen() failed: reason: " . socket_strerror(socket_last_error())."\n");
+            die("socket_listen() failed: reason: " . socket_strerror(socket_last_error()).PHP_EOL);
         }
         socket_set_nonblock($sock); // 非阻塞
         // 接收套接流的最大超时时间1秒，后面是微秒单位超时时间，设置为零，表示不管它
-        socket_set_option($sock, SOL_SOCKET, SO_RCVTIMEO, array("sec" => 1, "usec" => 0));
+        socket_set_option($sock, SOL_SOCKET, SO_RCVTIMEO, array("sec" => 5, "usec" => 0));
         $this->logger("server start");
 
         array_push($this->read_socket, $sock);
@@ -62,10 +72,12 @@ class WebSocketServer
                     $this->logger("new Client", $wsid);
 
                     $line = $this->usocketRead($newconn);
+                    // print_r($line);var_dump($line);
                     if (!$this->handShake($wsid, $line)) {
                         // 握手失败
-                        $this->wsClose($newconn);
                         $this->logger("handshake fail", $wsid);
+                        $this->wsClose($newconn);
+
                         continue;
                     }
                     $this->logger("handshake success", $wsid);
@@ -85,20 +97,31 @@ class WebSocketServer
                 } else {
                     $opcode = $received->getOpcode();
                     $wsid = $this->getWsid($rfd);
-                    if ($opcode == 0x8) { // 客户端主动关闭连接
-                        $this->call_func($this->onClose, array($this->ws_conn[$wsid]));
-                        $this->wsClose($rfd);
-                        continue;
+                    switch($opcode) {
+                        case 0x1:
+                        case 0x2:
+                            $this->call_func($this->onMessage, array($this->ws_conn[$wsid], $received));
+                            break;
+                        case 0x5:
+                        case 0x6:
+                        case 0x7:
+                            // print_r($received);
+                            $this->logger("opcode ".hexdec($opcode), $wsid);
+                            break;
+                        case 0x8: // 客户端主动关闭连接
+                            $this->call_func($this->onClose, array($this->ws_conn[$wsid]));
+                            $this->wsClose($rfd);
+                            break;
+                        case 0x9: // 心跳连接ping帧
+                            $this->logger("ping", $wsid);
+                            $this->wsWrite($this->ws_conn[$wsid]->getResource(), $received->getData());
+                            break;
+                        case 0xA: // 心跳连接pong帧
+                            $this->logger("pong", $wsid);
+                            break;
+                        default:
+                            $this->logger("error opcode", $wsid);
                     }
-                    if ($opcode == 0x9) { // 心跳连接ping帧
-                        $this->logger("ping", $wsid);
-                        continue;
-                    }
-                    if ($opcode == 0xA) { // 心跳连接pong帧
-                        $this->logger("pong", $wsid);
-                        continue;
-                    }
-                    $this->call_func($this->onMessage, array($this->ws_conn[$wsid], $received));
                 }
             }
 
@@ -109,7 +132,7 @@ class WebSocketServer
 
     /**
      * 获取活跃的链接
-     * 
+     *
      * @param Resource $tmp_reads
      * @return Resource $tmp_reads
      */
@@ -130,7 +153,7 @@ class WebSocketServer
 
     /**
      * 新增链接
-     * 
+     *
      * @param Resource $newconn
      * @return Integer $wsid
      */
@@ -183,7 +206,7 @@ class WebSocketServer
 
     /**
      * 通过socket resource获取wsid
-     * 
+     *
      * @param Resource $sock
      * @return Integer $wsid
      */
@@ -198,13 +221,13 @@ class WebSocketServer
 
     /**
      * websocket握手
-     * 
+     *
      * @param Integer $wsid
      * @param String $line
-     * @return Boolean 
+     * @return Boolean
      */
     private function handShake($wsid, $line) {
-        if ($line === '') {
+        if (empty($line)) {
             return false;
         }
         // Get Sec-WebSocket-Key.
@@ -215,6 +238,7 @@ class WebSocketServer
                 return false;
             }
         }
+        // var_dump($Sec_WebSocket_Key);
         // Calculation websocket key.
         $new_key = base64_encode(sha1($Sec_WebSocket_Key . "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", true));
         // Handshake response data.
@@ -228,12 +252,14 @@ class WebSocketServer
             return false;
         }
         $this->ws_conn[$wsid]->handShakeSuccess();
+        // $this->logger("handshake");
+        // echo $handshake_message;
         return true;
     }
 
     /**
      * 读取客户端的内容
-     * 
+     *
      * @param Resource $rfd
      * @return String $line
      */
@@ -247,29 +273,14 @@ class WebSocketServer
     }
 
     private function usocketRead($rfd) {
-        $i = (int)$rfd;
-        $line = '';
-        $flg = 0;
-        while (true) {
-            $command = socket_read($rfd, 1);
-            if ($command === '') {
-                break;
-            }
-            if ($command === false) {
-                $flg = 1;
-                break;
-            }
-            $line .= $command;
-        }
 
-        if ($line == '') {
-            if ($flg == 1) {
-                $this->logger("Connection closed on socket $i.");
-                $this->wsClose($rfd);
-            }
-            var_dump($rfd);
-            print_r($this->ws_conn);
-            // echo "等待数据\n";
+        $buffer = "";
+        $bytes = @socket_recv($rfd, $buffer, 4096, 0);
+        if ($bytes === false) {
+            return false;
+        } elseif ($bytes > 0) {
+            return substr($buffer, 0, $bytes);
+        } else {
             return false;
         }
 
@@ -278,7 +289,7 @@ class WebSocketServer
 
     /**
      * 发送内容至客户端
-     * 
+     *
      * @param Resource $rfd
      * @param String $content
      */
@@ -289,17 +300,23 @@ class WebSocketServer
 
     /**
      * 关闭连接
-     * 
+     *
      * @param Resource $rfd
      */
     public function wsClose($rfd) {
         $wsid = $this->getWsid($rfd);
-        $status = 1;
-        $response = "\x88".chr(strlen($status)).$status; // 发送关闭帧
+
+        $status = 1000;
+        $message = pack('n', $status);
+        $messageLength = strlen($message);
+        $fin = 128;
+        $opcode = 8;
+        $response = pack('n', (($fin | $opcode) << 8) | $messageLength).$message;
         $ret = socket_write($rfd, $response, strlen($response));
 
         @socket_shutdown($rfd);
         @socket_close($rfd);
+
         $key = array_search($rfd, $this->read_socket);
         if ($key) {
             array_splice($this->read_socket, $key, 1);
@@ -317,7 +334,7 @@ class WebSocketServer
 
     /**
      * 编码
-     * 
+     *
      * @param String $buffer
      * @return String $encode_buffer
      */
@@ -342,7 +359,7 @@ class WebSocketServer
 
     /**
      * 编码
-     * 
+     *
      * @param String $buffer
      * @return Object $received
      */
@@ -378,11 +395,11 @@ class WebSocketServer
         $mask = $this->getBitOne($secondbyte, 8);
 
         return new class($fin, $rsv1, $rsv2, $rsv3,
-                        $opcode, $mask, $len, $decoded) {
+                        $opcode, $mask, $len, $decoded, $buffer) {
             private $info;
 
             function __construct($fin, $rsv1, $rsv2, $rsv3,
-                        $opcode, $mask, $playload_len, $data) {
+                        $opcode, $mask, $playload_len, $data, $buffer) {
                 $this->info['fin'] = $fin;
                 $this->info['rsv1'] = $rsv1;
                 $this->info['rsv2'] = $rsv2;
@@ -393,6 +410,9 @@ class WebSocketServer
                 $this->info['data'] = $data;
             }
 
+            public function getRaw() {
+                return $this->info['raw'];
+            }
             public function getFin() {
                 return $this->info['fin'];
             }
@@ -452,7 +472,7 @@ class WebSocketServer
 
     /**
      * 打印日志
-     * 
+     *
      * @param String $buffer
      * @param Integer $wsid
      * @param Integer $level
