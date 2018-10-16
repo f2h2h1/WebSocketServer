@@ -109,7 +109,6 @@ class WebSocketServer
                             $this->logger("opcode ".hexdec($opcode), $wsid);
                             break;
                         case 0x8: // 客户端主动关闭连接
-                            $this->call_func($this->onClose, array($this->ws_conn[$wsid]));
                             $this->wsClose($rfd);
                             break;
                         case 0x9: // 心跳连接ping帧
@@ -304,7 +303,9 @@ class WebSocketServer
      * @param Resource $rfd
      */
     public function wsClose($rfd) {
+
         $wsid = $this->getWsid($rfd);
+        $this->call_func($this->onClose, array($this->ws_conn[$wsid]));
 
         $status = 1000;
         $message = pack('n', $status);
