@@ -1,7 +1,8 @@
-# 说明
+# 简介
 - 这是一个简单的基于 php 的 websocket 服务器
 - 支持 7.1 或以上版本
 - 只能在 cli 模式下运行
+
 #### 如何使用
 1. 引入 WebSocketServer.php
 ```php
@@ -38,6 +39,7 @@ $ws->run();
 ```
 php demo.php
 ```
+
 #### 完整 demo
 ```php
 $ip = 127.0.0.1;
@@ -61,6 +63,7 @@ $ws->onMessage = function($conn, $received, $wsObj) {
 
 $ws->run();
 ```
+
 #### 目录结构
 ~~~
 ├─ExampleEcho.html       demo 前端
@@ -70,6 +73,7 @@ $ws->run();
 #### TODO
 1. 发送 ping 帧
 2. 数据分片
+
 #### 存在的 bug
 1. 使用火狐浏览器首次连接时，速度非常慢
 2. 无法正确响应 opcode 为 7 的请求
